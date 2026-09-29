@@ -1,0 +1,12 @@
+PixelMplus (PixelMplus10), by Itou Hiroki (itouhiro), based on the M+ BITMAP FONTS
+https://itouhiro.github.io/PixelMplus/
+
+Used in Champion Island (games/championisland), drawn from the font's own
+pixels at its native 10 px.
+
+M+ FONT LICENSE
+
+These fonts are free software.
+Unlimited permission is granted to use, copy, and distribute them, with
+or without modification, either commercially or noncommercially.
+THESE FONTS ARE PROVIDED "AS IS" WITHOUT WARRANTY.
