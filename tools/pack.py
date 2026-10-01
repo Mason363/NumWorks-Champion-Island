@@ -9,7 +9,9 @@ needs goes in one blob:
 - sprites: every image the libraries place, as 8-bit palette indices. Small
   ones are packed in LZMA "banks" of at most BANK bytes, decoded into a cache
   on demand; large backgrounds are LZMA "streams" decoded row by row into the
-  background layer. Both use a dictionary of at most DICT bytes.
+  background layer. Both use a dictionary of at most DICT bytes. A very tall
+  stream is cut into strips of about STRIP_BYTES compressed, each its own LZMA
+  stream, so that a row deep down is reached without decoding every row above.
 - symbols: bitmaps, shapes, texts and clips. A clip's timeline is a list of
   keyframes per child slot, labels, frame scripts (stop, dispatchEvent) and its
   components (the Animate "this.T = {...}" data);
@@ -36,6 +38,8 @@ EX = os.path.join(ROOT, 'build/ex')
 BANK = 16384          # decoded size of a sprite bank at most
 DICT = 8192           # LZMA dictionary: the decoder's ring buffer
 STREAM_MIN = 20000    # sprites with more pixels than this are streamed backgrounds
+STRIP_BYTES = 8000    # a stream taller than STRIP_MIN_H starts afresh once a strip compresses to this much,
+STRIP_MIN_H = 512     # so that a row deep down costs no more decoding than that (the climbing vista)
 
 SHEETS = ['preload-sprite.png', 'shared-sprite.png', 'cutscene-sprite.png', 'overworld-sprite.png', 'archery-sprite.png',
           'climbing-sprite.png', 'marathon-sprite.png', 'pingpong-sprite.png', 'rugby-sprite.png', 'skate-sprite.png', 'swim-sprite.png']
@@ -182,13 +186,65 @@ def mat_mul(m, n):
     return (a * A + c * B, b * A + d * B, a * C + c * D, b * C + d * D, a * TX + c * TY + tx, b * TX + d * TY + ty)
 
 
+# ------------------------------------------------------------------ masks
+def mask_box(m):
+    """The rectangle a mask's path is, in its parent's space (x0, y0, x1, y1), or None."""
+    if [op for op, _ in m['g'] if op not in ('P', 'Z')] != ['M', 'L', 'L', 'L']:
+        return None
+    a, b, c, d, tx, ty = matrix(m['tr'])
+    if b or c:
+        return None
+    pts = [(round(a * p.get('x', 0) + tx, 3), round(d * p.get('y', 0) + ty, 3)) for op, p in m['g'] if op in ('M', 'L')]
+    if any((p[0] == q[0]) == (p[1] == q[1]) for p, q in zip(pts, pts[1:] + pts[:1])):
+        return None
+    return min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)
+
+
+# A mask is a clipping path. A bitmap that a rectangle masks, the same on every
+# frame (Lucky's climbing statue shows only the pedestal of the champion's),
+# becomes the part of its image the mask shows: a symbol of its own, after all
+# the others. Masks that move are not kept (the child is drawn whole).
+CUTS = []   # (lib, name) of the cut bitmaps
+for lib, _ in LIBS:
+    syms = LIB[lib]['syms']
+    for k, s in list(syms.items()):
+        masked = defaultdict(list)
+        for fr in s.get('frames') or []:
+            for c in fr:
+                if c.get('mask'):
+                    masked[c['i']].append(c)
+        for cs in masked.values():
+            c = cs[0]
+            still = all(json.dumps([o.get('sym'), o['tr'], o['mask']]) == json.dumps([c.get('sym'), c['tr'], c['mask']]) for o in cs)
+            sheet = syms.get(c.get('sym'), {}).get('sheet') if c['t'] == 'b' else None
+            box = mask_box(c['mask'])
+            a, b, cc, d, tx, ty = matrix(c['tr'])
+            if not still or not sheet or not box or b or cc or a <= 0 or d <= 0:
+                continue
+            sh, x, y, w, h = sheet
+            u0, v0 = max(0, math.floor((box[0] - tx) / a + .5)), max(0, math.floor((box[1] - ty) / d + .5))
+            u1, v1 = min(w, math.floor((box[2] - tx) / a + .5)), min(h, math.floor((box[3] - ty) / d + .5))
+            if u0 >= u1 or v0 >= v1:
+                continue
+            name = '%s.%s' % (k, c['sym'])
+            syms[name] = {'t': 'b', 'sheet': (sh, x + u0, y + v0, u1 - u0, v1 - v0)}
+            CUTS.append((lib, name))
+            for o in cs:
+                del o['mask']
+                o['sym'] = name
+                o['tr'] = dict(o['tr'], x=round(o['tr'].get('x', 0) + a * u0, 3), y=round(o['tr'].get('y', 0) + d * v0, 3))
+
 # ------------------------------------------------------------------ symbols
 SYMS = []            # (lib, name)
 SYM_ID = {}
 for name, _ in LIBS:
     for k in LIB[name]['syms']:
-        SYM_ID[(name, k)] = len(SYMS)
-        SYMS.append((name, k))
+        if (name, k) not in CUTS:
+            SYM_ID[(name, k)] = len(SYMS)
+            SYMS.append((name, k))
+for key in CUTS:
+    SYM_ID[key] = len(SYMS)
+    SYMS.append(key)
 
 # sprites: every bitmap symbol with an image
 SPR_ID, SPR = {}, []   # key (sheet,x,y,w,h) -> id
@@ -1255,11 +1311,29 @@ bank_offs = []
 for raw in banks:
     comp = lzma_raw(raw, len(raw))
     bank_offs.append((blob.add(comp, 1), len(comp), len(raw)))
-stream_off = {}
+
+
+def strips(px):
+    """Where a stream's strips start: rows are added 8 at a time while the strip compresses to STRIP_BYTES."""
+    h, cuts = px.shape[0], [0]
+    while h > STRIP_MIN_H:
+        y = cuts[-1] + 8
+        while y < h and len(lzma_raw(px[cuts[-1]:y + 8].tobytes(), DICT)) <= STRIP_BYTES:
+            y += 8
+        if y >= h:
+            break
+        cuts.append(y)
+    return cuts + [h]
+
+
+stream_off = {}       # per stream, its strips: (offset, compressed size, raw size)
 for sp in streams:
-    raw = sprite_pixels(sp).tobytes()
-    comp = lzma_raw(raw, DICT)
-    stream_off[sp] = (blob.add(comp, 1), len(comp), len(raw))
+    px = sprite_pixels(sp)
+    cuts = strips(px)
+    stream_off[sp] = []
+    for y0, y1 in zip(cuts, cuts[1:]):
+        comp = lzma_raw(px[y0:y1].tobytes(), DICT)
+        stream_off[sp].append((blob.add(comp, 1), len(comp), (y1 - y0) * px.shape[1]))
 # scenery images: columns of BAND_W pixels, each its own stream, so that painting
 # a strip of the world decodes only the columns it needs
 band_off = {}
@@ -1312,7 +1386,7 @@ spr_bin = bytearray()
 for sp, rec in enumerate(SPR):
     sh, x, y, w, h = rec['key']
     if sp in stream_off:
-        o, cl, rl = stream_off[sp]
+        o, cl, rl = stream_off[sp][0]
         spr_bin += struct.pack('<HHBBHII', w, h, sh, 1, 0, o, rle_size(sp))
     elif sp in band_off:
         spr_bin += struct.pack('<HHBBHII', w, h, sh, 2, 0, band_off[sp], 0)
@@ -1333,7 +1407,9 @@ for b in range(len(banks)):
     m = sorted(bank_members[b])
     bm_offs.append(blob.add(struct.pack('<H', len(m)) + b''.join(struct.pack('<H', sp) for _, sp in m), 2))
 off_bankspr = blob.add(b''.join(struct.pack('<I', o) for o in bm_offs))
-off_streams = blob.add(b''.join(struct.pack('<HIII', sp, *stream_off[sp]) for sp in streams))
+# the stream table: a record per strip, those of a stream in a row
+stream_recs = [(sp, *st) for sp in streams for st in stream_off[sp]]
+off_streams = blob.add(b''.join(struct.pack('<HIII', *r) for r in stream_recs))
 
 pal_bin = bytearray()
 for i in range(len(SHEETS)):
@@ -1605,7 +1681,7 @@ off_strdata = blob.add(bytes(str_data), 1)
 
 HEADER = [
     ('magic', 0x31304943), ('nsheets', len(SHEETS)), ('pal', off_pal), ('nsprites', len(SPR)), ('sprites', off_spr),
-    ('nbanks', len(banks)), ('banks', off_banks), ('nstreams', len(streams)), ('streams', off_streams),
+    ('nbanks', len(banks)), ('banks', off_banks), ('nstreams', len(stream_recs)), ('streams', off_streams),
     ('nsyms', len(SYMS)), ('syms', off_syms), ('nmats', len(MATS)), ('mats', off_mats),
     ('nstrings', len(strings)), ('strtab', off_strtab), ('strdata', off_strdata),
     ('nexprs', len(EXPRS)), ('exprs', off_exprs), ('ndlg', len(dlg_index)), ('dlg', off_dlg_index),
@@ -1621,7 +1697,7 @@ h.append('enum { ' + ', '.join('H_%s' % k.upper() for k, _ in HEADER) + ', H_COU
 h.append('#define BANK_MAX %d' % max(len(b) for b in banks))
 h.append('#define SPRITE_COUNT %d' % len(SPR))
 h.append('#define BANK_COUNT %d' % len(banks))
-h.append('#define STREAM_MAX %d' % max(stream_off[sp][2] for sp in streams))
+h.append('#define STREAM_MAX %d' % max(r[3] for r in stream_recs))
 h.append('#define SPRITE_W_MAX %d' % max(r['key'][3] for r in SPR))
 h.append('#define LZMA_DICT %d' % DICT)
 h.append('enum { SYM_NONE, SYM_BITMAP, SYM_CLIP, SYM_SHAPE, SYM_CONT };')
@@ -1662,7 +1738,7 @@ open(os.path.join(ROOT, 'src/names.c'), 'w').write('\n'.join(names) + '\n')
 
 # ------------------------------------------------------------------ report
 tot_banks = sum(b[1] for b in bank_offs)
-tot_streams = sum(v[1] for v in stream_off.values())
+tot_streams = sum(r[2] for r in stream_recs)
 print('symbols %d, sprites %d (%d banks %d KB, %d streams %d KB), mats %d, strings %d, exprs %d, dialog nodes %d, vars %d' % (
     len(SYMS), len(SPR), len(banks), tot_banks // 1024, len(streams), tot_streams // 1024, len(MATS), len(strings), len(EXPRS), len(dlg_index), len(VARS)))
 print({k: v // 1024 for k, v in STATS.items()})
@@ -1693,7 +1769,7 @@ if os.environ.get('PACK_REPORT'):
     by = Counter()
     for sp in streams:
         libs = ','.join(sorted(SPR[sp]['libs']))
-        by[libs] += stream_off[sp][1]
+        by[libs] += sum(st[1] for st in stream_off[sp])
     print('streams by lib (KB):', {k: v // 1024 for k, v in by.most_common()})
     by = Counter()
     for sp, rec in enumerate(spr_rec):

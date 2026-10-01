@@ -15,7 +15,7 @@ static Xf xfs[XF_MAX];
 
 /* texts set by code */
 #define TX_MAX 48
-typedef struct { NodeId n; const char *s; int32_t color; } Tx;   /* color: RGB565, -1 as designed */
+typedef struct { NodeId n; int16_t lw; const char *s; int32_t color; } Tx;   /* lw: lineWidth set by code (0: as designed); color: RGB565, -1 as designed */
 static Tx txs[TX_MAX];
 
 /* event listeners */
@@ -705,7 +705,7 @@ static bool shape_bounds(const uint8_t *sh, float *x, float *y, float *w, float 
 
 /* CreateJS getBounds: a bitmap's rectangle, a shape's extent, and for a
  * clip the union of its visible children's bounds at its current frame */
-typedef struct { float lx, ly, hx, hy; bool any; } Acc;
+typedef struct { float lx, ly, hx, hy; bool any, texts; } Acc;   /* texts: count them too */
 
 static void acc_rect(Acc *a, Mat m, float x, float y, float w, float h) {
   float xs[4] = {x, x + w, x, x + w}, ys[4] = {y, y, y + h, y + h};
@@ -722,6 +722,17 @@ static Mat key_mat(const Key *k) {
   if (k->mat) { const float *mm = mat(k->mat); a = mm[0]; b = mm[1]; c = mm[2]; d = mm[3]; }
   float rx = k->rx4 * 0.25f, ry = k->ry4 * 0.25f;
   return (Mat){a, b, c, d, k->x - (rx * a + ry * c), k->y - (rx * b + ry * d)};
+}
+
+/* a text's box as CreateJS measures it: its lines in the font at its size
+ * (the font is 10 px), from its anchor (alignment, baseline) */
+static void text_acc(const uint8_t *t, Mat m, Acc *a) {
+  float k = t[2] * 0.1f;
+  int lw = rds16(t + 8) / 4, w, h;
+  if (!k) return;
+  font_measure(str(rd16(t)), lw > 0 ? (int)(lw / k) : 0, 0, &w, &h);
+  float fw = w * k, fh = h * k;
+  acc_rect(a, m, t[6] == 1 ? -fw / 2 : t[6] == 2 ? -fw : 0, -(t[7] == 1 ? 6 : t[7] >= 2 ? 10 : 1) * k, fw, fh);
 }
 
 static void sym_acc(uint16_t sym, unsigned frame, Mat m, Acc *a, int depth) {
@@ -747,6 +758,7 @@ static void sym_acc(uint16_t sym, unsigned frame, Mat m, Acc *a, int depth) {
       if (idx == NONE16 || (k.flags & (K_ABSENT | K_HIDDEN))) continue;
       Mat km = mat_mul(m, key_mat(&k));
       if (k.kind == CK_SHAPE) { if (shape_bounds(payload(k.ref), &x, &y, &w, &h)) acc_rect(a, km, x, y, w, h); }
+      else if (k.kind == CK_TEXT) { if (a->texts) text_acc(payload(k.ref), km, a); }
       else if (k.kind == CK_SYM) {
         unsigned f = k.mode == MODE_SYNCHED ? k.sp + frame - k.start : k.mode == MODE_SINGLE ? k.sp : 0;
         sym_acc(k.ref, f, km, a, depth + 1);
@@ -800,7 +812,7 @@ static void node_acc(NodeId id, Mat m, Acc *a, int depth) {
 }
 
 bool node_bounds(NodeId n, float *x, float *y, float *w, float *h) {
-  Acc a = {0, 0, 0, 0, false};
+  Acc a = {0, 0, 0, 0, false, false};
   node_acc(n, MAT_ID, &a, 0);
   if (!a.any) {
     /* nothing to show: Animate's nominal bounds, if any */
@@ -966,6 +978,41 @@ void clip_each_slot(uint16_t sym, unsigned frame, bool (*fn)(unsigned slot, cons
   }
 }
 
+/* where a timeline child shows (in the clip's space): a clip's nominal
+ * bounds are not in the data (the doodle's compiler renamed nominalBounds),
+ * so its bounds are what its first frame shows (CreateJS getBounds) */
+static bool child_bounds(const Key *k, float *x, float *y, float *w, float *h) {
+  if (!key_bounds(k, x, y, w, h)) return false;
+  if (*w || *h) return true;
+  Acc a = {0, 0, 0, 0, false, true};
+  sym_acc(k->ref, k->mode != MODE_INDEPENDENT ? k->sp : 0, key_mat(k), &a, 0);
+  if (a.any) { *x = a.lx; *y = a.ly; *w = a.hx - a.lx; *h = a.hy - a.ly; }
+  return true;
+}
+
+/* how far a lazy clip's children reach out of their origins (left, up,
+ * right, down), measured once: only those whose origin is that near the
+ * rectangle need measuring */
+static uint16_t reach_sym = NONE16, reach_frame;
+static float reach[4];
+static void measure_reach(NodeId n, const Clip *c) {
+  reach_sym = nodes[n].sym;
+  reach_frame = nodes[n].frame;
+  memset(reach, 0, sizeof reach);
+  const uint8_t *q = c->slots;
+  for (unsigned s = 0; s < c->nslots; s++) {
+    Key k;
+    uint16_t idx;
+    float bx, by, bw, bh;
+    q = slot_key(q, nodes[n].frame, &k, &idx);
+    if (idx == NONE16 || (k.flags & K_ABSENT) || !child_bounds(&k, &bx, &by, &bw, &bh)) continue;
+    reach[0] = fmaxf(reach[0], k.x - bx);
+    reach[1] = fmaxf(reach[1], k.y - by);
+    reach[2] = fmaxf(reach[2], bx + bw - k.x);
+    reach[3] = fmaxf(reach[3], by + bh - k.y);
+  }
+}
+
 void node_stream(NodeId n, float x0, float y0, float x1, float y1) {
   Clip c;
   if (!(nodes[n].flags2 & NF2_LAZY) || !clip_get(nodes[n].sym, &c)) return;
@@ -989,8 +1036,15 @@ void node_stream(NodeId n, float x0, float y0, float x1, float y1) {
     while (hi < nh && nodes[have[hi]].slot < s) hi++;
     NodeId got = hi < nh && nodes[have[hi]].slot == s ? have[hi] : 0;
     bool present = idx != NONE16 && !(k.flags & K_ABSENT);
+    /* near: its box (a clip's: its origin) in the rectangle, else what it shows */
     float bx, by, bw, bh;
-    bool near = present && (needs_node(&k) || map_kids) && key_bounds(&k, &bx, &by, &bw, &bh) && bx < x1 && by < y1 && bx + bw > x0 && by + bh > y0;
+    bool near = false;
+    if (present && (needs_node(&k) || map_kids) && key_bounds(&k, &bx, &by, &bw, &bh)) {
+      near = bx < x1 && by < y1 && bx + bw > x0 && by + bh > y0;
+      if (!near && (reach_sym != nodes[n].sym || reach_frame != nodes[n].frame)) measure_reach(n, &c);
+      if (!near && k.x - reach[0] < x1 && k.y - reach[1] < y1 && k.x + reach[2] > x0 && k.y + reach[3] > y0)
+        near = child_bounds(&k, &bx, &by, &bw, &bh) && bx < x1 && by < y1 && bx + bw > x0 && by + bh > y0;
+    }
     if (near && !got) {
       if (nh >= HAVE_MAX) continue;
       NodeId nc = new_child_for(&k);
@@ -1045,6 +1099,7 @@ static void draw_virtual(uint16_t sym, unsigned frame, Mat m, uint8_t alpha, int
 
 static const char *text_of(NodeId n);
 static int32_t text_color(NodeId n);
+static int text_width(NodeId n);
 
 /* a text node's text s (NULL: its own), placed by m (the view's), as the
  * doodle's canvas sets it: the size on screen picks the font's scale (in
@@ -1058,8 +1113,9 @@ void node_text_draw(NodeId id, Mat m, const char *s, int32_t color, uint8_t alph
   if (!s) s = text_of(id);
   float scale = sqrtf(m.a * m.a + m.b * m.b), px = t[2] * scale;
   int k3 = px >= 11.5f ? (int)(px * 0.3f + .5f) : 3;
-  int lw = (int)(rds16(t + 8) * 0.25f * scale), lh = (int)(rds16(t + 10) * 0.25f * scale);
-  if (lh > 0 && lh < FONT_LINE * k3 / 3) lh = FONT_LINE * k3 / 3;
+  int tw = text_width(id);
+  int lw = (int)((tw ? tw : rds16(t + 8) * 0.25f) * scale), lh = (int)(rds16(t + 10) * 0.25f * scale + .5f);
+  if (lh > 0 && lh < FONT_HEIGHT * k3 / 3) lh = FONT_HEIGHT * k3 / 3;   /* the lineHeight, at least a glyph (the dialogue's 11 px: its options follow its lines) */
   m.ty += (t[7] == 1 ? -6 : t[7] >= 2 ? -10 : -1) * k3 / 3;   /* top, middle, alphabetic */
   gfx_text_k3(s, m, color >= 0 ? (uint16_t)color : rgb565(t[3], t[4], t[5]), t[6], (int16_t)lw, (int16_t)lh, alpha, k3);
 }
@@ -1139,12 +1195,22 @@ static const char *text_of(NodeId n) {
 
 void node_set_text(NodeId n, const char *s) {
   for (int i = 0; i < TX_MAX; i++) if (txs[i].n == n) { txs[i].s = s; return; }
-  for (int i = 0; i < TX_MAX; i++) if (!txs[i].n) { txs[i] = (Tx){n, s, -1}; return; }
+  for (int i = 0; i < TX_MAX; i++) if (!txs[i].n) { txs[i] = (Tx){n, 0, s, -1}; return; }
 }
 
 void node_set_text_color(NodeId n, uint16_t c) {
   for (int i = 0; i < TX_MAX; i++) if (txs[i].n == n) { txs[i].color = c; return; }
-  for (int i = 0; i < TX_MAX; i++) if (!txs[i].n) { txs[i] = (Tx){n, NULL, c}; return; }
+  for (int i = 0; i < TX_MAX; i++) if (!txs[i].n) { txs[i] = (Tx){n, 0, NULL, c}; return; }
+}
+
+void node_set_text_width(NodeId n, int16_t lw) {
+  for (int i = 0; i < TX_MAX; i++) if (txs[i].n == n) { txs[i].lw = lw; return; }
+  for (int i = 0; i < TX_MAX; i++) if (!txs[i].n) { txs[i] = (Tx){n, lw, NULL, -1}; return; }
+}
+
+static int text_width(NodeId n) {
+  for (int i = 0; i < TX_MAX; i++) if (txs[i].n == n) return txs[i].lw;
+  return 0;
 }
 
 static int32_t text_color(NodeId n) {

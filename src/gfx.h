@@ -14,6 +14,9 @@ static const Mat MAT_ID = {1, 0, 0, 1, 0, 0};
 void gfx_begin(void);                                     /* new draw list */
 void gfx_sprite(uint16_t sprite, Mat m, uint8_t alpha);  /* a sprite placed by m */
 void gfx_sprite_ex(uint16_t sprite, Mat m, uint8_t alpha, bool opaque_only);   /* opaque_only: skips see-through pixels */
+/* a sprite at (x, y) stretched to h rows, each the nearest of its own (the
+ * ending's glow, the doodle's whole screen, over the island's taller view) */
+void gfx_sprite_rows(uint16_t sprite, int x, int y, int h, uint8_t alpha);
 void gfx_shape(const uint8_t *shape, Mat m, uint8_t alpha);  /* filled polygons (payload) */
 void gfx_rect(int x, int y, int w, int h, uint16_t c, uint8_t alpha);
 /* one small image at n places (pos: x, y pairs, moved by ox, oy): 4-bit pixels,
@@ -54,6 +57,7 @@ void bg_water4(const uint8_t *tile, int w, int h, const uint16_t *colours);   /*
 void bg_redraw_water(void);                               /* the water tile's pixels changed */
 int bg_clear_index(void);                                 /* the palette's clear index, -1 if none */
 void bg_blit_stream(uint16_t sprite, int x, int y);
+void bg_blit_rows(uint16_t sprite, int x, int y, int y0, int y1);   /* only its world rows y0 to y1 (a stream) */
 void bg_fill(int x, int y, int w, int h, uint8_t index);
 void bg_redraw(uint16_t sprite, int x, int y, uint8_t flags);   /* the layer again where the sprite at world x, y is opaque */
 uint8_t *bg_layer(int *w, int *h);

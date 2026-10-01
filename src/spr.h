@@ -5,7 +5,9 @@
 
 /* LZMA decoding (one stream at a time) */
 void z_open(uint32_t off, uint32_t clen, uint32_t rawlen);
+void z_open_stream(const uint8_t *st);          /* a stream from its record (spr_stream), all its strips */
 uint32_t z_read(uint32_t n, const uint8_t **at);
+extern uint32_t z_epoch;                        /* changes when the decoder is opened again */
 bool z_get(uint8_t *dst, uint32_t n);
 
 /* Run-length rows of a sprite, decoded on demand, or NULL:
@@ -17,9 +19,11 @@ const uint8_t *spr_get_soft(uint16_t sprite);   /* spr_get without letting go of
 const uint8_t *spr_stream(uint16_t sprite);   /* 14-byte stream record or NULL */
 const uint8_t *spr_mask(uint16_t sprite);     /* its opaque pixels as spans (decodes it if needed), or NULL */
 const uint8_t *spr_peek_mask(uint16_t sprite);
+uint32_t spr_mask_bytes(uint16_t sprite);     /* the cache its mask takes (a guess until it is made) */
 /* the decoder at the sprite's first row, its pixels following (w a row),
  * without the cache: for big scenery the cache has no room for */
 bool spr_rows_open(uint16_t sprite, const Sprite *s);
+bool spr_rows_at(uint16_t sprite, const Sprite *s, int row);   /* the same from row `row` on */
 bool spr_room(uint32_t bytes);                  /* would fit without letting go of what the last frame drew */
 void spr_pin(uint16_t sprite, const uint8_t *rle);
 bool spr_pinned(uint16_t sprite);                /* kept outside the cache (spr_pin) */

@@ -27,6 +27,13 @@ void menus_init(void) {
   depth = 0;
 }
 
+/* Er over a menu: the frames its saved values pick (world.c) */
+static void storage_sprites(NodeId n) {
+  extern void storage_sprite(NodeId n);
+  storage_sprite(n);
+  for (NodeId c = nodes[n].first; c; c = nodes[c].next) storage_sprites(c);
+}
+
 /* the menus clip at one menu's frame (only that menu's nodes exist) */
 static void show_label(const char *label) {
   if (root) node_free(root);
@@ -35,6 +42,7 @@ static void show_label(const char *label) {
   root = node_new_sym_frame(S_menus_Obb, clip_label(&c, label));
   node_update(root);
   ent_register_tree(root);
+  storage_sprites(root);
 }
 
 static NodeId current_menu(void) {
@@ -96,6 +104,21 @@ static const char *tutorial_of(const char *name) {
   if (!game_is_sport(name)) return NULL;
   snprintf(l, sizeof l, "tut%c%sDesktop", name[0] - 32, name + 1);
   return l;
+}
+
+/* Lq: each menu keeps its focus as long as the app runs (the doodle's menus
+ * live as long as the page): its button's event id, by the menu's id */
+static uint16_t kept[16][2];
+static uint16_t *kept_of(NodeId m, bool make) {
+  uint16_t id = m ? comp_str(nodes[m].T, C_menu, F_id) : NONE16;
+  if (id == NONE16) return NULL;
+  for (int i = 0; i < 16; i++) if (kept[i][0] == id + 1) return &kept[i][1];
+  for (int i = 0; make && i < 16; i++) if (!kept[i][0]) { kept[i][0] = id + 1; kept[i][1] = NONE16; return &kept[i][1]; }
+  return NULL;
+}
+static void keep_focus(NodeId m) {
+  uint16_t *k = kept_of(m, true);
+  if (k && focus) *k = comp_str(nodes[focus].T, C_button, F_eventId);
 }
 
 static void setup(NodeId m) {
@@ -161,6 +184,9 @@ static void setup(NodeId m) {
     hide_button(m, "soundOff");
     hide_button(m, "textRetro");
     hide_button(m, "textModern");
+    NodeId l;
+    if ((l = node_find(m, "soundLabel"))) node_set_visible(l, false);   /* and their rows' names */
+    if ((l = node_find(m, "textStyleLabel"))) node_set_visible(l, false);
   } else if (!strcmp(id, "newgame")) {
     set_text(m, "title", msg("NEW_GAME"));
     set_text(m, "prompt", msg("NEW_GAME_PROMPT"));
@@ -170,29 +196,46 @@ static void setup(NodeId m) {
     set_text(m, "title", msg("LEADERBOARD"));
     set_label(button(m, "back"), "CLOSE");
     /* lr: the teams' scores come from the doodle's server; on the calculator
-     * there is only the player's own team and the stars they won for it */
-    NodeId l = node_find(m, "loading");
-    if (l) node_set_visible(l, false);
-    for (int i = 1; i < 4; i++) {
-      char k[16];
-      snprintf(k, sizeof k, "teamName%d", i);
-      if ((l = node_find(m, k))) node_set_visible(l, false);
-      snprintf(k, sizeof k, "teamScore%d", i);
-      if ((l = node_find(m, k))) node_set_visible(l, false);
-    }
+     * there is only the player's own team and the stars they won for it, in
+     * its row (teamName + TeamId: the rows' icons are blue, red, green, yellow) */
+    static const char *const rows[4] = {"BLUE", "RED", "GREEN", "YELLOW"};
     static char team[16], score[12];
     const char *t = store_str("PLAYER_TEAM");
     snprintf(team, sizeof team, "%s", t && t[0] ? t : "NO_TEAM");
     for (char *c = team; *c; c++) if (*c >= 'a' && *c <= 'z') *c -= 32;
+    int row = 0;
+    for (int i = 0; i < 4; i++) if (!strcmp(team, rows[i])) row = i;
+    NodeId l = node_find(m, "loading");
+    if (l) node_set_visible(l, false);
     snprintf(score, sizeof score, "%d", (int)store_num("SUBMITTED_SCORES", 0));
-    if ((l = node_find(m, "teamName0"))) {
-      node_set_text(l, msg(team));
-      node_set_text_color(l, team_color(team));
+    for (int i = 0; i < 4; i++) {
+      char k[16];
+      snprintf(k, sizeof k, "teamName%d", i);
+      if ((l = node_find(m, k))) {
+        node_set_visible(l, i == row);
+        node_set_text(l, msg(team));
+        node_set_text_color(l, team_color(team));
+      }
+      snprintf(k, sizeof k, "teamScore%d", i);
+      if ((l = node_find(m, k))) {
+        node_set_visible(l, i == row);
+        node_set_text(l, score);
+      }
     }
-    if ((l = node_find(m, "teamScore0"))) node_set_text(l, score);
   } else if (!strcmp(id, "controls")) {
     set_label(button(m, "back"), "BACK");
+    /* gs: each action's keys, the calculator's (its arrows, OK and Back, and
+     * the keys that do the same) in place of a keyboard's and a gamepad's */
+    static const char *const keys[12][2] = {
+      {"kbUp", "ArrowUp"}, {"kbDown", "ArrowDown"}, {"kbLeft", "ArrowLeft"}, {"kbRight", "ArrowRight"},
+      {"kbAction", "OK"}, {"kbCancel", "Back"}, {"gpUp", "8"}, {"gpDown", "2"}, {"gpLeft", "4"}, {"gpRight", "6"},
+      {"gpAction", "EXE"}, {"gpCancel", "Backspace"}};
+    for (int i = 0; i < 12; i++) set_text(node_find(m, keys[i][0]), "text", keys[i][1]);
+    set_text(node_find(m, "confirmButton"), "label", msg("CONFIRM"));
+    set_text(node_find(m, "defaultsButton"), "label", msg("DEFAULTS"));
   }
+  uint16_t *k = kept_of(m, false);
+  if (k && *k != NONE16) focus = button(m, str(*k));
 }
 
 bool menus_open(const char *label) {
@@ -301,6 +344,7 @@ static void menu_nav(NodeId m) {
   bool ok = false;
   for (int i = 0; i < n; i++) if (list[i] == focus) ok = true;
   if (!ok) focus = n ? list[0] : 0;
+  keep_focus(m);
   for (int i = 0; i < n; i++) node_goto(list[i], list[i] == focus ? "focus" : "idle", 0, false);
   if (in.pressed[A_ACTION] && focus) {
     input_consume(A_ACTION);
@@ -335,6 +379,7 @@ static void menu_nav(NodeId m) {
     }
     if (best) focus = best;
   }
+  keep_focus(m);
 }
 
 /* ---------------------------------------------------------------- results (Xo) */

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "font.h"
 #include "gfx.h"
+#include "phys.h"
 #include "spr.h"
 
 Input in;
@@ -213,6 +214,10 @@ static void switch_scene(void) {
   }
 #endif
   toast_style("", 0, -1, -1);          /* Hq: a new scene takes the banner away */
+  /* and its own physics world (the doodle's cannonWorld is the scene's): the
+   * island's walls near the player, bodies of no entity, used to stay and fill
+   * it up after a few doors, leaving the player without a body */
+  phys_reset();
   state_bytes = 0;
   mem_layout(0, 0, 0, NULL);
   memset(&in.pressed, 0, sizeof in.pressed);

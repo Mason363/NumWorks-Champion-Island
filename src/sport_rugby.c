@@ -399,6 +399,7 @@ static void materialize(Actor *a) {
   node_add(S->map, n);
   place(n, &k);
   lazy_frame(n, a->frame);
+  if (a->kind == A_END) node_play(n);   /* the end zone's glow: nothing stops it in the doodle */
   a->n = n;
   ent_set_pos(n, a->x, a->y);
   act_dirs(n, a->dir);
@@ -1198,7 +1199,13 @@ static void paths(void) {
 /* ---------------------------------------------------------------- camera (Cq, Dq) */
 static void camera(void) {
   NodeId cam = S->map;
-  if (S->pl >= 0) {
+#ifdef HOST
+  extern bool host_cam(float *x, float *y);
+  bool fixed = host_cam(&nodes[cam].x, &nodes[cam].y);   /* tests: the camera where they say */
+#else
+  bool fixed = false;
+#endif
+  if (S->pl >= 0 && !fixed) {
     float px, py;
     act_pos(&S->act[S->pl], &px, &py);
     Mat cg = node_global(cam);

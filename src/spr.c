@@ -17,11 +17,14 @@ static uint8_t ring[LZMA_DICT] __attribute__((aligned(4)));
 static CLzmaDec dec;
 static const uint8_t *z_src;
 static uint32_t z_in, z_len, z_out, z_total;
+static const uint8_t *z_next;   /* a stream's next strip (its record), read on when this one ends */
+uint32_t z_epoch;               /* counts z_open: whoever reads on knows if someone else used the decoder */
 
 #ifdef HOST
 uint64_t z_bytes, z_opens;   /* tests: how much the decoder did */
 #endif
 void z_open(uint32_t off, uint32_t clen, uint32_t rawlen) {
+  z_epoch++;
   memset(&dec, 0, sizeof dec);
   dec.prop.lc = 0;
   dec.prop.lp = 0;
@@ -41,12 +44,24 @@ void z_open(uint32_t off, uint32_t clen, uint32_t rawlen) {
   z_len = clen;
   z_out = 0;
   z_total = rawlen;
+  z_next = NULL;
+}
+
+/* A stream is one record of the stream table, or several in a row for a tall
+ * image cut into strips (pack.py): read as one, strip after strip. */
+void z_open_stream(const uint8_t *st) {
+  z_open(rd32(st + 2), rd32(st + 6), rd32(st + 10));
+  const uint8_t *end = ci_data + HDR(H_STREAMS) + 14u * HDR(H_NSTREAMS);
+  if (st + 14 < end && rd16(st + 14) == rd16(st)) z_next = st + 14;
 }
 
 /* Decodes up to n more bytes; they sit in ring[] from *at (never wrapping:
  * a read ends at the end of the ring). Returns how many (0 at the end). */
 uint32_t z_read(uint32_t n, const uint8_t **at) {
-  if (z_out >= z_total) return 0;
+  if (z_out >= z_total) {
+    if (!z_next) return 0;
+    z_open_stream(z_next);
+  }
   if (dec.dicPos == LZMA_DICT) dec.dicPos = 0;
   uint32_t start = (uint32_t)dec.dicPos, room = LZMA_DICT - start;
   if (n > room) n = room;
@@ -137,6 +152,15 @@ static void compact(void) {
 }
 
 static inline uint16_t age(const Entry *e) { return (uint16_t)((uint16_t)tick - e->used); }
+/* what getting an entry back costs for each byte of room it takes: its
+ * sprite's pixels (a mask's too) decoded again, with what comes before them
+ * in their bank (16ths of a byte); a tiny sprite at the end of a bank costs
+ * the most */
+static uint32_t regain(const Entry *e) {
+  Sprite s;
+  sprite_info((uint16_t)(e->spr & 0x7FFF), &s);
+  return (((s.kind ? 0 : s.off) + (uint32_t)s.w * s.h) << 4) / (e->size + 4u);
+}
 
 /* the cache the entries used this tick (keep = 0) or the last too (keep = 1) take */
 static uint32_t fresh_bytes(unsigned keep, unsigned *count) {
@@ -148,13 +172,6 @@ static uint32_t fresh_bytes(unsigned keep, unsigned *count) {
   return n;
 }
 
-static void evict_one(void) {
-  int old = 0;
-  for (int i = 1; i < nent; i++)
-    if (age(&ent[i]) > age(&ent[old])) old = i;
-  ent[old] = ent[--nent];
-}
-
 /* Room for n bytes; evicts only entries not used this tick or the last
  * (keep = 1), or this tick (keep = 0), unless forced. */
 static uint8_t *alloc_keep(uint32_t n, bool force, unsigned keep) {
@@ -164,14 +181,18 @@ static uint8_t *alloc_keep(uint32_t n, bool force, unsigned keep) {
     uint32_t live = 0;
     for (int i = 0; i < nent; i++) live += (ent[i].size + 3) & ~3u;
     while (nent && (live + n > cache_bytes || nent >= ENTRIES)) {
-      /* the oldest goes; of what this very frame draws (a frame bigger than
-       * the cache), the smallest: a big one costs the most to decode again */
+      /* the oldest goes; of the same age (what this very frame draws, in a
+       * frame bigger than the cache), the one cheapest to get back */
       int old = 0;
-      for (int i = 1; i < nent; i++)
-        if (age(&ent[i]) > age(&ent[old]) || (!age(&ent[i]) && !age(&ent[old]) && ent[i].size < ent[old].size)) old = i;
+      uint32_t r = regain(&ent[0]);
+      for (int i = 1; i < nent; i++) {
+        if (age(&ent[i]) < age(&ent[old])) continue;
+        uint32_t ri = regain(&ent[i]);
+        if (age(&ent[i]) > age(&ent[old]) || ri < r) { old = i; r = ri; }
+      }
       if (!force && age(&ent[old]) <= keep) return NULL;
       live -= (ent[old].size + 3) & ~3u;
-      evict_one();
+      ent[old] = ent[--nent];          /* that one (its size is what live lost) */
     }
     /* only when the space is short: a full entry table needs no moving */
     if (top + n > cache_bytes) compact();
@@ -334,7 +355,7 @@ const uint8_t *spr_get(uint16_t sp) {
   if (s.kind == 1) {
     const uint8_t *st = spr_stream(sp);
     if (!st) return NULL;
-    z_open(rd32(st + 2), rd32(st + 6), rd32(st + 10));
+    z_open_stream(st);
     add_from_decoder(sp, &s, true);
   } else {
     const uint8_t *b = ci_data + HDR(H_BANKS) + 12u * s.bank;
@@ -384,13 +405,27 @@ bool spr_rows_open(uint16_t sp, const Sprite *s) {
   if (s->kind == 1) {
     const uint8_t *st = spr_stream(sp);
     if (!st) return false;
-    z_open(rd32(st + 2), rd32(st + 6), rd32(st + 10));
+    z_open_stream(st);
     return true;
   }
   if (s->kind != 0) return false;
   const uint8_t *b = ci_data + HDR(H_BANKS) + 12u * s->bank;
   z_open(rd32(b), rd32(b + 4), rd32(b + 8));
   return z_get(NULL, s->off);
+}
+
+/* spr_rows_open at row `row`: a stream in strips starts from the strip holding it */
+bool spr_rows_at(uint16_t sp, const Sprite *s, int row) {
+  const uint8_t *st = s->kind == 1 ? spr_stream(sp) : NULL;
+  if (!st) return spr_rows_open(sp, s) && z_get(NULL, (uint32_t)row * s->w);
+  const uint8_t *end = ci_data + HDR(H_STREAMS) + 14u * HDR(H_NSTREAMS);
+  uint32_t skip = (uint32_t)row * s->w;
+  while (st + 14 < end && rd16(st + 14) == sp && skip >= rd32(st + 10)) {
+    skip -= rd32(st + 10);
+    st += 14;
+  }
+  z_open_stream(st);
+  return z_get(NULL, skip);
 }
 
 bool spr_room(uint32_t n) {
@@ -490,6 +525,21 @@ static uint32_t mask_rows(uint16_t sp, const Sprite *s, const uint8_t *al, uint8
   return o.at;
 }
 
+/* the sizes of masks made before: one the cache let go is made again from
+ * the decoder in one pass */
+#define KNOWN 32
+typedef struct { uint16_t sp, size; } Known;
+static Known known[KNOWN];
+static unsigned known_next;
+static uint32_t mask_known(uint16_t sp) {
+  for (int i = 0; i < KNOWN; i++)
+    if (known[i].sp == sp && known[i].size) return known[i].size;
+  return 0;
+}
+static void mask_learn(uint16_t sp, uint32_t n) {
+  if (n && n <= 0xFFFF && !mask_known(sp)) known[known_next++ % KNOWN] = (Known){sp, (uint16_t)n};
+}
+
 const uint8_t *spr_mask(uint16_t sp) {
   if (sp >= SPRITE_COUNT || !mem) return NULL;
   unsigned f = find((uint16_t)(sp | MASK));
@@ -500,29 +550,41 @@ const uint8_t *spr_mask(uint16_t sp) {
   Sprite s;
   sprite_info(sp, &s);
   const uint8_t *al = palalpha(s.sheet);
-  if (!find(sp) && !spr_room(s.rle ? s.rle : rle_bound(s.w, s.h))) {
-    /* no room for the sprite: its mask straight from the decoder, measured then
-     * written; not even measured when what the frame draws leaves too little
-     * room (a guess: an eighth of the sprite's runs), as a frame bigger than
-     * the cache would measure it again and again */
-    if (fresh_bytes(0, NULL) + s.rle / 8 > cache_bytes) return NULL;
-    uint32_t n = mask_rows(sp, &s, al, NULL);
-    if (!n || n > 0xFFFF || nent >= ENTRIES) return NULL;
-    uint8_t *m = alloc_keep(n, false, 0);
+  bool had = find(sp);
+  if (!had && !spr_room(s.rle ? s.rle : rle_bound(s.w, s.h))) {
+    /* no room for the sprite: its mask straight from the decoder, measured
+     * (once: the size is kept, and frames count it) then written, when what
+     * the frame draws leaves room for it */
+    uint32_t n = mask_known(sp);
+    if (!n) mask_learn(sp, n = mask_rows(sp, &s, al, NULL));
+    if (!n || n > 0xFFFF || fresh_bytes(0, NULL) + n > cache_bytes) return NULL;
+    uint8_t *m = alloc_keep(n, false, 0);   /* (a full table lets an older entry go) */
     if (!m || mask_rows(sp, &s, al, m) != n || nent >= ENTRIES) return NULL;
     ent[nent++] = (Entry){(uint16_t)(sp | MASK), (uint16_t)((uint32_t)(m - mem) / 4), (uint16_t)n, (uint16_t)tick};
     return m;
   }
   if (!spr_get(sp)) return NULL;
   uint32_t n = mask_build(mem + 4u * ent[find(sp) - 1].off4, al, NULL);
-  if (n > 0xFFFF || nent >= ENTRIES) return NULL;
+  if (n > 0xFFFF) return NULL;
+  mask_learn(sp, n);
   uint8_t *m = alloc_keep(n, false, 0);   /* may move the sprite (compaction): look it up again */
   unsigned fs = find(sp);
+  if (fs && !had) ent[fs - 1].used = (uint16_t)(tick - 2);   /* decoded for its mask only: the first to go */
   if (!m || !fs) return NULL;
   mask_build(mem + 4u * ent[fs - 1].off4, al, m);
   if (nent >= ENTRIES) return NULL;
   ent[nent++] = (Entry){(uint16_t)(sp | MASK), (uint16_t)((uint32_t)(m - mem) / 4), (uint16_t)n, (uint16_t)tick};
   return m;
+}
+
+/* the room a sprite's mask takes: its size once made, else a guess (a
+ * quarter of the sprite's runs, about what scenery's masks take) */
+uint32_t spr_mask_bytes(uint16_t sp) {
+  uint32_t n = mask_known(sp);
+  if (n) return (n + 3) & ~3u;
+  Sprite s;
+  sprite_info(sp, &s);
+  return ((s.rle ? s.rle : rle_bound(s.w, s.h)) / 4 + 3) & ~3u;
 }
 
 const uint8_t *spr_peek_mask(uint16_t sp) {

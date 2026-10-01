@@ -190,6 +190,17 @@ static void view_origin(float *x, float *y) {
   *y = (m.b * m.tx - m.a * m.ty) / det;
 }
 
+/* the same at a whole pixel: the layer is drawn there, and so is the map (the
+ * doodle's canvas snaps the map's own translation before placing its children,
+ * snapToPixel): people and things keep their pixel on the ground whatever the
+ * camera's fraction, instead of shaking against it as it scrolls */
+static void view_pixel(int *x, int *y) {
+  float vx, vy;
+  view_origin(&vx, &vy);
+  *x = (int)floorf(vx + .5f);
+  *y = (int)floorf(vy + .5f);
+}
+
 /* ---------------------------------------------------------------- drawing the map */
 static float draw_key(NodeId c) {
   if (nodes[c].ent && comp_has(nodes[c].T, C_drawOrderOverride)) return comp_float(nodes[c].T, C_drawOrderOverride, F_drawOrder, 0);
@@ -227,6 +238,10 @@ static void draw_static_over(unsigned id, Mat m, uint8_t alpha) {
 
 /* the map's children in draw order, with the statics that belong in front of them */
 static void draw_map(NodeId map, Mat m, uint8_t alpha) {
+  int px, py;
+  view_pixel(&px, &py);
+  m.tx = -(m.a * px + m.c * py);        /* map pixel (px, py) at the view's corner, as in the layer */
+  m.ty = -(m.b * px + m.d * py);
   float vx, vy;
   view_origin(&vx, &vy);
   float vx1 = vx + VIEW_W, vy1 = vy + gfx_view_bottom();
@@ -303,9 +318,18 @@ static void translate_tree(NodeId n) {
   for (NodeId c = nodes[n].first; c; c = nodes[c].next) translate_tree(c);
 }
 
+void storage_sprite(NodeId n);
+/* a storageSprite shows its frame from the start, not after its turn comes
+ * (Lucky's statues flashed on the pedestals of champions not yet beaten) */
+static void storage_tree(NodeId n) {
+  storage_sprite(n);
+  for (NodeId c = nodes[n].first; c; c = nodes[c].next) storage_tree(c);
+}
+
 static void streamed_in(NodeId c) {
   ent_register_tree(c);
   translate_tree(c);
+  storage_tree(c);
   uint16_t T = nodes[c].T;
   if (T == NONE16) return;
   /* sr: places are markers for the designers */
@@ -525,22 +549,29 @@ static const uint8_t COND_F[10] = {F_condition1, F_condition2, F_condition3, F_c
 static const uint8_t FRAME_F[5] = {F_frame1, F_frame2, F_frame3, F_frame4, F_frame5};
 static const uint8_t NODE_F[10] = {F_node1, F_node2, F_node3, F_node4, F_node5, F_node6, F_node7, F_node8, F_node9, F_node10};
 
-/* Er: storageSprite shows the frame of its first true condition (a quarter of them per tick) */
+/* Er: a storageSprite shows the frame of its first true condition (the
+ * island's and the menus': the map's scrolls and team) */
+void storage_sprite(NodeId n) {
+  uint16_t T = nodes[n].T;
+  if (T == NONE16 || !comp_has(T, C_storageSprite)) return;
+  for (int k = 0; k < 5; k++) {
+    uint16_t fr = comp_str(T, C_storageSprite, FRAME_F[k]);
+    if (fr == NONE16 || !str(fr)[0]) continue;
+    uint16_t cond = comp_str(T, C_storageSprite, COND_F[k]);
+    if (cond == NONE16 || !str(cond)[0] || cond_eval(cond)) {
+      ent_label(n, str(fr), false);
+      break;
+    }
+  }
+}
+
+/* a quarter of them per tick */
 static void sys_storage_sprites(void) {
   for (int i = 0; i < ent_count(); i++) {
     NodeId n = ent_at(i);
     if (!n || !comp_has(nodes[n].T, C_storageSprite)) continue;
     if (W->tick && n % 4 != W->tick % 4) continue;
-    uint16_t T = nodes[n].T;
-    for (int k = 0; k < 5; k++) {
-      uint16_t fr = comp_str(T, C_storageSprite, FRAME_F[k]);
-      if (fr == NONE16 || !str(fr)[0]) continue;
-      uint16_t cond = comp_str(T, C_storageSprite, COND_F[k]);
-      if (cond == NONE16 || !str(cond)[0] || cond_eval(cond)) {
-        ent_label(n, str(fr), false);
-        break;
-      }
-    }
+    storage_sprite(n);
   }
 }
 
@@ -668,14 +699,19 @@ static void sys_npcs(void) {
 /* tr, ur, Fr: what trigger areas do when the player walks in */
 static void on_trigger(NodeId t, NodeId other, bool entered) {
   if (!entered) return;
+#ifdef HOST
+  if (getenv("CI_PATH")) return;       /* tests fly over the island */
+#endif
   uint16_t T = nodes[t].T;
   if (comp_has(T, C_dialogTrigger)) {
     uint16_t npc = comp_str(T, C_dialogTrigger, F_npc), node = comp_str(T, C_dialogTrigger, F_node);
     if (npc != NONE16 && node != NONE16) dialog_start(npc, node);
   }
   if (comp_has(T, C_sceneTrigger)) {
+    /* ur: no er() here, a room's exit would save a place of the room, not
+     * one of the island (where the game would then open on the dock) */
     uint16_t nm = comp_str(T, C_sceneTrigger, F_name);
-    if (nm != NONE16) { save_place(); game_go(str(nm)); }
+    if (nm != NONE16) game_go(str(nm));
   }
   if (comp_has(T, C_storageTrigger)) {
     uint16_t k = comp_str(T, C_storageTrigger, F_key), v = comp_str(T, C_storageTrigger, F_value);
@@ -718,7 +754,7 @@ static const uint8_t *pattern(unsigned i) {
   return i < rd16(blk) ? blk + rd32(blk + 4 + 4 * i) : NULL;
 }
 
-/* oAa, mAa: after the ending (outro seen), a glow over the top of the view and
+/* oAa, mAa: after the ending (outro seen), a glow over the whole view and
  * the petals falling over the island (repeatable tiles of 144 x 62, the 20
  * looks of a petal taking turns every 3 ticks) */
 static bool petal_slot(unsigned slot, const SlotInfo *si, void *ctx) {
@@ -730,7 +766,11 @@ static bool petal_slot(unsigned slot, const SlotInfo *si, void *ctx) {
 }
 static void draw_ending(float mx, float my) {
   uint16_t gs = glow_sprite();
-  if (gs != NONE16) gfx_sprite(gs, (Mat){1, 0, 0, 1, 0, (float)gfx_view_top()}, 255);   /* over the top of the screen */
+#ifdef HOST
+  if (getenv("CI_NOGLOW")) gs = NONE16;   /* tests: the same frame without the glow */
+#endif
+  /* nAa is the doodle's whole screen (the stage, at 3x): it covers the whole view */
+  if (gs != NONE16) gfx_sprite_rows(gs, 0, gfx_view_top(), gfx_view_bottom() - gfx_view_top(), 255);
   const uint8_t *t = pattern(1);
   if (!t || !W->npetal) return;
   unsigned looks = rd16(t + 2), look = W->tick / 3 % (looks ? looks : 1);
@@ -769,6 +809,62 @@ void nth_place(const char *name, float x, float y, void *ctx) {
   Nth *q = ctx;
   if (q->i++ == q->want) snprintf(q->name, sizeof q->name, "%s", name);
   (void)x; (void)y;
+}
+/* CI_DIFF (play.c): the layer painted again from scratch and the live
+ * children streamed again, as a teleport does, to compare with the frame
+ * kept up as the camera moved; the children that were missing, -1 if not
+ * on the island */
+static int redo_new;
+static void redo_count(NodeId c) {
+  streamed_in(c);
+  float vx, vy, bx, by, bw, bh;
+  view_origin(&vx, &vy);
+  if (!nodes[c].alpha || !node_bounds_in(c, W->map, &bx, &by, &bw, &bh)) return;
+  bx -= vx;
+  by -= vy;
+  if (bx >= VIEW_W || bx + bw <= 0 || by >= gfx_view_bottom() || by + bh <= gfx_view_top()) return;
+  fprintf(stderr, "  missing child sym %u at %.0f,%.0f %.0fx%.0f on screen\n", nodes[c].sym, bx, by, bw, bh);
+  redo_new++;
+}
+static uint8_t redo_layer[LAYER_W * LAYER_H];
+/* after the new frame: the layer's pixels on screen that changed, and where */
+int world_layer_diff(int box[4]) {
+  int w, h, n = 0;
+  uint8_t *l = bg_layer(&w, &h);
+  float vx, vy;
+  view_origin(&vx, &vy);
+  int cx = (int)floorf(vx + .5f), cy = (int)floorf(vy + .5f);
+  box[0] = box[1] = 9999;
+  box[2] = box[3] = -9999;
+  for (int y = gfx_view_top(); y < gfx_view_bottom(); y++)
+    for (int x = 0; x < VIEW_W; x++) {
+      int lx = (cx + x) % w, ly = (cy + y) % h;
+      lx += lx < 0 ? w : 0;
+      ly += ly < 0 ? h : 0;
+      if (l[ly * w + lx] == redo_layer[ly * w + lx]) continue;
+      n++;
+      if (x < box[0]) box[0] = x;
+      if (y < box[1]) box[1] = y;
+      if (x > box[2]) box[2] = x;
+      if (y > box[3]) box[3] = y;
+    }
+  return n;
+}
+int world_redo(char *where, int size) {
+  if (!W || !W->map || strcmp(game.name, "overworld")) return -1;
+  int lw, lh;
+  memcpy(redo_layer, bg_layer(&lw, &lh), sizeof redo_layer);
+  float vx, vy;
+  view_origin(&vx, &vy);
+  PlaceQuery q = {NULL, vx + VIEW_W / 2, vy + VIEW_H / 2, 0, false, ""};
+  each_place(find_place, &q);
+  snprintf(where, (size_t)size, "view %.0f,%.0f near %s", vx, vy, q.name);
+  bg_invalidate();
+  redo_new = 0;
+  node_stream_hook = redo_count;
+  stream_children(true);
+  node_stream_hook = streamed_in;
+  return redo_new;
 }
 static int subtree(NodeId n) {
   int t = 1;
@@ -872,10 +968,39 @@ static void end_overworld(void) {
   W = NULL;
 }
 
+#ifdef HOST
+/* CI_PATH="speed;x,y;x,y;...": the player flies along the path (through
+ * walls) at speed px a tick, the camera following, and stays CI_HOLD ticks
+ * at each point (fly_held: the point whose last tick this is) (tests) */
+int fly_held = -1;
+static void fly_path(const char *s) {
+  float speed = strtof(s, NULL), t = (float)W->tick, px = 0, py = 0;
+  float hold = getenv("CI_HOLD") ? (float)atoi(getenv("CI_HOLD")) : 0;
+  int i = 0;
+  for (const char *p = strchr(s, ';'); p; p = strchr(p + 1, ';'), i++) {
+    float x, y;
+    if (sscanf(p + 1, "%f,%f", &x, &y) != 2) break;
+    float len = i ? hypotf(x - px, y - py) : 0, go = len / speed;
+    if (t < go) { px += (x - px) * t / go; py += (y - py) * t / go; t = -1; break; }
+    px = x; py = y;
+    t -= go;
+    if (t < hold) { if (t + 1 >= hold) fly_held = i; t = -1; break; }
+    t -= hold;
+  }
+  if (!i || !W->player) return;
+  ent_set_pos(W->player, px, py);
+  Ent *e = ent_get(W->player);
+  if (e) e->vx = e->vy = 0;
+}
+#endif
+
 static void tick_overworld(void) {
   if (!W || !W->map) return;
   sys_back_map();
   sys_overworld_player();
+#ifdef HOST
+  if (getenv("CI_PATH")) fly_path(getenv("CI_PATH"));
+#endif
   sys_camera_target();
   sys_camera_move();
   sys_tile_backgrounds();
@@ -940,9 +1065,9 @@ static void draw_under_overworld(void) {
     water_make(look);
     bg_water4(W->water, WATER, WATER, W->water_col);
   }
-  float vx, vy;
-  view_origin(&vx, &vy);
-  bg_camera((int)floorf(vx + .5f), (int)floorf(vy + .5f));
+  int px, py;
+  view_pixel(&px, &py);
+  bg_camera(px, py);
 }
 
 const SceneDef scene_overworld = {"overworld", start_overworld, tick_overworld, end_overworld, draw_under_overworld, draw_over_overworld, NULL};
@@ -975,6 +1100,10 @@ static void start_interior(void) {
     /* sr: places are markers */
     if (n && comp_has(nodes[n].T, C_location) && !comp_has(nodes[n].T, C_boundable)) nodes[n].alpha = 0;
   }
+  /* sr: at the scene's place (the door he came in by: a hallway's far end,
+   * the top of the banyan tree), else the saved one, as on the island */
+  const char *where = game.location[0] ? game.location : store_str("PLAYER_LOC");
+  if (where && W->map) teleport(where);
   ent_on_trigger(on_trigger);
   phys_steps(1, 20);
   (void)room_label;

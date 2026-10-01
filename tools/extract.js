@@ -60,6 +60,13 @@ function bake(id) {
       return [kind ? kind[1] : 'X', d];
     });
   }
+  function place(c) {
+    const tr = { x: r2(c.x), y: r2(c.y) };
+    if (c.scaleX !== 1) tr.sx = r2(c.scaleX); if (c.scaleY !== 1) tr.sy = r2(c.scaleY);
+    if (c.rotation) tr.r = r2(c.rotation); if (c.skewX) tr.kx = r2(c.skewX); if (c.skewY) tr.ky = r2(c.skewY);
+    if (c.regX) tr.rx = r2(c.regX); if (c.regY) tr.ry = r2(c.regY);
+    return tr;
+  }
   function childDesc(c, idx) {
     const n = { i: idx };
     const sym = protoName.get(Object.getPrototypeOf(c));
@@ -71,16 +78,14 @@ function bake(id) {
     else if (c instanceof cj.MovieClip) { n.t = 'm'; n.mode = c.mode; n.sp = c.startPosition; n.loop = c.loop; n.cf = c.currentFrame; }
     else if (c instanceof cj.Container) n.t = 'c';
     else n.t = '?';
-    const tr = { x: r2(c.x), y: r2(c.y) };
-    if (c.scaleX !== 1) tr.sx = r2(c.scaleX); if (c.scaleY !== 1) tr.sy = r2(c.scaleY);
-    if (c.rotation) tr.r = r2(c.rotation); if (c.skewX) tr.kx = r2(c.skewX); if (c.skewY) tr.ky = r2(c.skewY);
-    if (c.regX) tr.rx = r2(c.regX); if (c.regY) tr.ry = r2(c.regY);
+    const tr = place(c);
     if (c.alpha !== 1) tr.a = r2(c.alpha); if (!c.visible) tr.v = 0;
     if (c.compositeOperation) tr.co = c.compositeOperation;
     if (c.filters && c.filters.length) tr.fl = c.filters.map(f => f.constructor.name);
     if (c.name) tr.nm = c.name;
     n.tr = tr;
-    if (c.mask) n.mask = 1;
+    /* a mask: its path, placed in the parent's space as the child is */
+    if (c.mask) n.mask = { g: c.mask.graphics ? gfx(c.mask.graphics) : [], tr: place(c.mask) };
     if (c.hitArea) n.hit = 1;
     return n;
   }

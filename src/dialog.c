@@ -98,12 +98,14 @@ static void show(uint16_t npc, uint16_t name) {
     if (txt) nodes[txt].x = 10;
     text_lw = 217;
   }
-  /* the text, broken into lines as the box shows it */
+  if (txt) node_set_text_width(txt, (int16_t)text_lw);
+  /* the text, broken into lines as the box shows it (getMetrics: the font's
+   * 10 px against the text's lineWidth, both in the text's own space) */
   dtext(cur.text, shown_buf, sizeof shown_buf);   /* shown_buf is free until the text types */
   const char *t = shown_buf;
   int k = 0;
   const char *s = t;
-  int lw_px = (int)(text_lw * 4.0f / 3);
+  int lw_px = text_lw;
   while (*s && k < (int)sizeof wrapped - 2) {
     /* reuse the font's wrapping: copy line by line */
     const char *nl = strchr(s, '\n');
@@ -134,6 +136,12 @@ static void show(uint16_t npc, uint16_t name) {
   wrapped[k] = 0;
   shown = 0;
   memset(opt_shown, 0, sizeof opt_shown);
+  NodeId base = node_child(box, "base");
+  if (base) {
+    float sx, sy, rot;
+    node_get_xform(base, &sx, &sy, &rot);
+    node_xform(base, sx, 1, rot);        /* qK.scaleY = 1 */
+  }
   if (txt) node_set_text(txt, "");
   NodeId nx = child_with(C_dialogNext);
   if (nx) node_set_visible(nx, false);
@@ -184,8 +192,10 @@ void dialog_tick(void) {
   memcpy(shown_buf, wrapped, (size_t)shown);
   shown_buf[shown] = 0;
   if (txt) node_set_text(txt, shown_buf);
+  /* getMeasuredHeight: its lines at its lineHeight */
   int lines = font_lines(shown_buf, 0);
-  float m = fmaxf((lines * 11) * 0.75f + 20, 68);
+  float lh = txt && nodes[txt].ref != NONE16 ? rds16(payload(nodes[txt].ref) + 10) * .25f : 12;
+  float m = fmaxf(lines * lh + 20, 68);
   NodeId nx = child_with(C_dialogNext), ptr = node_child(box, "pointer");
   if (nx) node_set_visible(nx, true);
   int no = find_options();
@@ -236,7 +246,7 @@ void dialog_tick(void) {
     node_get_xform(base, &sx, &sy, &rot);
     float bh = 68;   /* base art height at scale 1 */
     float target = m / bh;
-    node_xform(base, sx, sy + (target - sy) * .2f, rot);
+    node_xform(base, sx, sy + (target - sy) * .8f, rot);
   }
   /* keys: OK goes on (or picks the focused option), arrows move the focus */
   if (!done) {

@@ -69,15 +69,10 @@ typedef struct {
   /* parallax (Aq) */
   bool par_init;
   float par_dx, par_dy, par_hx, par_hy, par_fx, par_fy;
-  /* the sky (Iba's copies of one big picture, drawn by code) */
+  /* the sky (Iba's copies of one big picture, in the background layer) */
   uint16_t sky_sprite;
   int nsky;
-  float sky_x[SKY_MAX], sky_y[SKY_MAX];
-  float sky_ref;               /* the copy whose rows the forest texture matches */
-  bool tex, tex_on;            /* the forest texture is ready, shown */
-  uint8_t *tex_mem;
-  uint8_t tex_sheet;
-  int tex_cx, tex_cy;
+  int16_t sky_x[SKY_MAX], sky_y[SKY_MAX];
   Countdown cd;
   bool counting;
   /* the end (zq) */
@@ -413,19 +408,15 @@ static void end(void) {
 
 /* ---------------------------------------------------------------- the sky
  * Iba (the parallax backdrop) holds copies of one 432 x 1007 picture (sky,
- * sea, then forest), stacked with overlaps, the last one on top. The picture
- * is a single LZMA stream: drawing a row decodes every row above it, and the
- * forest's rows are dear (some 0.13 ms each on the calculator). So the sky is
- * drawn here: the copy that shows, as a sprite, while its rows are cheap (the
- * sky and the sea); lower down, a texture of the picture's forest decoded
- * once (the background layer's "water"), under the sea's colour where the
- * sea still shows. */
-#define TEX_W 384        /* the picture's columns 32..415: all the parallax ever shows */
-#define TEX_X0 32
-#define TEX_H 128
-#define TEX_ROW0 879     /* its rows 879..1006 */
-#define SKY_CHEAP 400    /* the deepest row the sprite may be drawn down to */
-#define SEA_END 520      /* the sea's last row, about */
+ * sea, then forest), stacked with overlaps, the last one on top. It shows
+ * through the cliff at every height, the forest too (at the cliff's sides,
+ * and through its holes in the hard variant). The picture is kept in the
+ * background layer: as the camera moves, only the rows and columns it
+ * uncovers are painted, each from the copy on top there (the picture's
+ * stream is cut into strips, so a row deep down costs no more than one near
+ * its top). The layer holds all the columns the parallax shows. */
+#define SKY_W 384
+#define SKY_H (VIEW_H + 8)
 
 static bool sky_slot(unsigned slot, const SlotInfo *si, void *ctx) {
   (void)slot; (void)ctx;
@@ -434,90 +425,46 @@ static bool sky_slot(unsigned slot, const SlotInfo *si, void *ctx) {
   if (t.type != SYM_BITMAP || S->nsky >= SKY_MAX) return true;
   if (S->nsky && (uint16_t)t.v != S->sky_sprite) return true;
   S->sky_sprite = (uint16_t)t.v;
-  S->sky_x[S->nsky] = si->x;
-  S->sky_y[S->nsky] = si->y;
+  S->sky_x[S->nsky] = (int16_t)floorf(si->x + .5f);
+  S->sky_y[S->nsky] = (int16_t)floorf(si->y + .5f);
   S->nsky++;
   return true;
 }
 
-static void sky_paint(int x0, int y0, int w, int h) { (void)x0; (void)y0; (void)w; (void)h; }
+/* the copy on top at row y of Iba, -1 if none */
+static int sky_top(int y) {
+  Sprite sp;
+  sprite_info(S->sky_sprite, &sp);
+  for (int k = S->nsky - 1; k >= 0; k--)
+    if (y >= S->sky_y[k] && y < S->sky_y[k] + sp.h) return k;
+  return -1;
+}
+
+/* the layer's world is Iba's space: each row from the copy on top there */
+static void sky_paint(int x0, int y0, int w, int h) {
+  (void)x0; (void)w;
+  for (int y = y0, y1; y < y0 + h; y = y1) {
+    int k = sky_top(y);
+    for (y1 = y + 1; y1 < y0 + h && sky_top(y1) == k;) y1++;
+    if (k >= 0) bg_blit_rows(S->sky_sprite, S->sky_x[k], S->sky_y[k], y, y1);
+  }
+}
 
 static void sky_setup(void) {
   if (!S->iba) return;
   clip_each_slot(nodes[S->iba].sym, nodes[S->iba].frame, sky_slot, NULL);
   if (!S->nsky) return;
   node_set_visible(S->iba, false);
-  S->sky_ref = S->sky_y[S->nsky - 1];
   Sprite sp;
   sprite_info(S->sky_sprite, &sp);
-  const uint8_t *st = spr_stream(S->sky_sprite);
-  if (!st || sp.w < TEX_X0 + TEX_W || sp.h < TEX_ROW0 + TEX_H) return;
-  /* the layer's memory: one clear pixel (the layer), then the texture */
-  mem_layout(TEX_W, TEX_H + 1, sp.sheet, sky_paint);
-  int w, h;
-  uint8_t *mem = bg_layer(&w, &h);
-  if (!mem || w != TEX_W || h != TEX_H + 1) { bg_off(); return; }
-  uint8_t *tex = mem + TEX_W;
-  z_open(rd32(st + 2), rd32(st + 6), rd32(st + 10));
-  bool ok = z_get(NULL, (uint32_t)TEX_ROW0 * sp.w);
-  for (int r = 0; ok && r < TEX_H; r++)
-    ok = z_get(NULL, TEX_X0) && z_get(tex + r * TEX_W, TEX_W) && z_get(NULL, (uint32_t)(sp.w - TEX_X0 - TEX_W));
-  if (!ok) { bg_off(); return; }
-  S->tex = true;
-  S->tex_mem = mem;
-  S->tex_sheet = sp.sheet;
-  bg_off();
-}
-
-/* the texture under everything, or nothing (the sky sprite covers the view) */
-static void texture_on(bool on) {
-  if (!S->tex || on == S->tex_on) return;
-  S->tex_on = on;
-  if (on) {
-    bg_setup(S->tex_mem, 1, 1, S->tex_sheet, sky_paint);
-    bg_water(S->tex_mem + TEX_W, TEX_W, TEX_H);
-    S->tex_cx = S->tex_cy = 0x7fffffff;
-  } else bg_off();
-}
-
-/* the copy on top at row l of Iba, -1 if none */
-static int sky_top(float l) {
-  Sprite sp;
-  sprite_info(S->sky_sprite, &sp);
-  for (int k = S->nsky - 1; k >= 0; k--)
-    if (l >= S->sky_y[k] && l < S->sky_y[k] + sp.h) return k;
-  return -1;
+  mem_layout(SKY_W, SKY_H, sp.sheet, sky_paint);
 }
 
 static void draw_under(void) {
   if (!S || !S->iba || !S->nsky) return;
+  /* the view's top left in Iba's space (its scale is the view's), snapped as a sprite would be */
   Mat M = mat_mul((Mat){1.0f / 3, 0, 0, 1.0f / 3, 0, 0}, node_global(S->iba));
-  if (M.d < 1e-3f || M.a < 1e-3f) return;
-  float v0 = -M.ty / M.d, v1 = v0 + VIEW_H / M.d;
-  int k0 = sky_top(v0), k1 = sky_top(v1 - 1);
-  if (k0 >= 0 && k0 == k1 && v1 - S->sky_y[k0] <= SKY_CHEAP) {
-    Mat t = M;
-    t.tx += M.a * S->sky_x[k0] + M.c * S->sky_y[k0];
-    t.ty += M.b * S->sky_x[k0] + M.d * S->sky_y[k0];
-    texture_on(false);
-    gfx_sprite(S->sky_sprite, t, 255);
-    return;
-  }
-  texture_on(true);
-  if (!S->tex) return;
-  /* the texture: the picture's columns from TEX_X0, the rows of copy sky_ref from TEX_ROW0 */
-  int x0 = (int)floorf(M.tx + M.a * S->sky_x[0] + .5f), y0 = (int)floorf(M.ty + M.d * S->sky_ref + .5f);
-  int cx = -x0 + TEX_X0, cy = -y0 + TEX_ROW0;
-  if (cx != S->tex_cx || cy != S->tex_cy) {
-    bg_camera(cx, cy);
-    S->tex_cx = cx;
-    S->tex_cy = cy;
-  }
-  /* where the sea still shows */
-  if (k0 >= 0 && v0 - S->sky_y[k0] < SEA_END) {
-    int ye = (int)floorf(M.ty + M.d * (S->sky_y[k0] + SEA_END) + .5f);
-    if (ye > 0) gfx_rect(0, 0, VIEW_W, ye < VIEW_H ? ye : VIEW_H, rgb565(52, 212, 180), 255);
-  }
+  bg_camera(-(int)floorf(M.tx + .5f), -(int)floorf(M.ty + .5f));
 }
 
 /* ---------------------------------------------------------------- start */
@@ -883,6 +830,10 @@ static void camera_goal(float *gx, float *gy) {
 
 static void sys_camera(void) {
   if (!S->target) return;
+#ifdef HOST
+  extern bool host_cam(float *x, float *y);
+  if (host_cam(&nodes[S->map].x, &nodes[S->map].y)) return;   /* tests: the camera where they say */
+#endif
   camera_goal(&S->qx, &S->qy);
   NodeId b = S->map;
   uint16_t T = nodes[b].T;
@@ -905,20 +856,6 @@ static void sys_parallax(void) {
     S->par_hx = nodes[S->map].x; S->par_hy = nodes[S->map].y;
     S->par_fx = S->par_fy = 0;
     comp_vec(nodes[p].T, C_parallax, F_factor, &S->par_fx, &S->par_fy);
-    /* the forest texture matches the copy of the sky seen from where the climber starts */
-    if (S->nsky && S->climber) {
-      float gx, gy;
-      NodeId t = S->target;
-      float tx, ty, cx, cy;
-      ent_pos(t, &tx, &ty);
-      ent_pos(S->climber, &cx, &cy);
-      ent_set_pos(t, cx, cy);
-      camera_goal(&gx, &gy);
-      ent_set_pos(t, tx, ty);
-      float iy = S->par_dy - S->par_fy * (S->par_hy - gy);
-      int k = sky_top(-iy / 3);
-      if (k >= 0) S->sky_ref = S->sky_y[k];
-    }
   }
   float cx = S->par_hx - nodes[S->map].x, cy = S->par_hy - nodes[S->map].y;
   nodes[p].x = S->par_dx - S->par_fx * cx;

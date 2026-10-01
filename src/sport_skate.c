@@ -666,7 +666,9 @@ static void index_query(const Index *ix, float x0, float y0, float x1, float y1,
   int cy0 = (int)floorf((y0 - ix->maxh - ix->y0) / ix->cell), cy1 = (int)floorf((y1 - ix->y0) / ix->cell);
   uint16_t pos[QMAX], end[QMAX];
   int k = 0;
-  if (cx1 >= 0 && cy1 >= 0 && cx0 < ix->nx && cy0 < ix->ny) {
+  /* a grid cut short (STARTS_MAX) keeps what lies past its last row or column
+   * there: a query past it reads that row or column */
+  if (cx1 >= 0 && cy1 >= 0) {
     cx0 = clampi(cx0, 0, ix->nx - 1); cx1 = clampi(cx1, 0, ix->nx - 1);
     cy0 = clampi(cy0, 0, ix->ny - 1); cy1 = clampi(cy1, 0, ix->ny - 1);
     for (int cy = cy0; cy <= cy1; cy++)
@@ -846,6 +848,15 @@ static void draw_screens(NodeId p, Mat parent) {
   }
 }
 
+/* CreateJS snaps each object's own offset to a whole pixel of its parent's
+ * space (snapToPixel): ground tiles a quarter pixel apart meet, no seam */
+static float snap(float v) { return (float)(int)(v + (v < 0 ? -.5f : .5f)); }
+static Mat snapped(Mat m) {
+  m.tx = snap(m.tx);
+  m.ty = snap(m.ty);
+  return m;
+}
+
 static void draw_item(const Item *it, Mat parent) {
   if (it->s->shape & SH_BITMAP) {
     Clip c;
@@ -853,7 +864,7 @@ static void draw_item(const Item *it, Mat parent) {
     SymInfo si;
     if ((it->k.flags & K_HIDDEN) || !clip_get(it->s->sym, &c) || !slot_at(c.slots, 0, &k, NULL) || (k.flags & K_HIDDEN)) return;
     sym_info(k.ref, &si);
-    gfx_sprite((uint16_t)si.v, mat_mul(mat_mul(parent, key_mat(&it->k)), key_mat(&k)), (uint8_t)(it->k.alpha * k.alpha / 255));
+    gfx_sprite((uint16_t)si.v, mat_mul(mat_mul(parent, snapped(key_mat(&it->k))), snapped(key_mat(&k))), (uint8_t)(it->k.alpha * k.alpha / 255));
     return;
   }
   NodeId p = proto(it->s);
@@ -1644,6 +1655,10 @@ static void champion(void) {
 /* ---------------------------------------------------------------- camera (Cq, Dq): the map follows the skater */
 static void camera(void) {
   NodeId map = S->map;
+#ifdef HOST
+  extern bool host_cam(float *x, float *y);
+  if (host_cam(&nodes[map].x, &nodes[map].y)) return;   /* tests: the camera where they say */
+#endif
   Mat l = node_local(map);
   float cx, cy;
   if (!mat_inv_apply(l, 480, 270, &cx, &cy)) return;

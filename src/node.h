@@ -138,5 +138,6 @@ void node_emit(NodeId n, uint16_t event);
 /* text nodes */
 void node_set_text(NodeId n, const char *s);   /* string kept by pointer */
 void node_set_text_color(NodeId n, uint16_t rgb565);
+void node_set_text_width(NodeId n, int16_t lw);   /* lineWidth set by code, in its own px (0: as designed) */
 const char *node_text(NodeId n);
 #endif
