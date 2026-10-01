@@ -146,6 +146,8 @@ __attribute__((unused)) static bool ef_write(const char *name, const void *conte
   if (total > 0xFFFF) return false;
   int at = ef_find(&fs, name, end);
   if (at >= 0 && ef_rd16(fs.buf + at) != total) {
+    /* (no room for the new size: the record stays as it was, not removed first and lost) */
+    if ((uint32_t)end - ef_rd16(fs.buf + at) + total + 2 > fs.size) return false;
     if (!ef_remove(name)) return false;
     end = ef_end(&fs);
     at = -1;

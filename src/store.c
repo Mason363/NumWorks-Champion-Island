@@ -132,8 +132,13 @@ static void save_copy(const uint8_t *d, uint32_t n, uint8_t *o, uint32_t cap) {
   p += sizeof SAVE_NAME - 1;
   *p++ = ':';
   for (uint32_t i = 0; i < n; i += 3, p += 4) {
-    uint32_t v = (uint32_t)d[i] << 16 | (i + 1 < n ? d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
-    for (int k = 0; k < 4; k++) p[k] = k <= (int)(n - i) ? (uint8_t)b64[v >> (18 - 6 * k) & 63] : '=';
+    /* (written out: GCC 15.2 for the calculator got a loop over the four wrong, see NumPlay's
+     * launcher/src/storage.c) */
+    uint32_t left = n - i, v = (uint32_t)d[i] << 16 | (left > 1 ? d[i + 1] << 8 : 0) | (left > 2 ? d[i + 2] : 0);
+    p[0] = (uint8_t)b64[v >> 18 & 63];
+    p[1] = (uint8_t)b64[v >> 12 & 63];
+    p[2] = left > 1 ? (uint8_t)b64[v >> 6 & 63] : '=';
+    p[3] = left > 2 ? (uint8_t)b64[v & 63] : '=';
   }
   *p++ = '\n';
   *p++ = 0;
