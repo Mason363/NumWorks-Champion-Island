@@ -89,3 +89,7 @@ Inspired by the Doodle Champion Island Games (2021). Not affiliated with Google 
 * Font: [PixelMplus](https://itouhiro.github.io/PixelMplus/) by Itou Hiroki, based on the M+ fonts ([license](LICENSES/PixelMplus.txt)).
 
 Made by Mason Chen as part of NumPlay.
+
+## License
+
+The game's code is licensed under the GNU General Public License v3.0: see the `LICENSE` file at the root of the repository. The doodle's pictures, animations, maps and texts, and the font, keep their own terms (see Credits).
