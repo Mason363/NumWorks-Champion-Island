@@ -82,6 +82,8 @@ void plat_push(int x, int y, int w, int h, const uint16_t *px);
 void plat_fill(int x, int y, int w, int h, uint16_t c);
 void plat_vsync(void);
 bool plat_save(const char *name, const void *data, uint32_t len);
+/* an N0110 or N0115 (216 MHz, the N0120 has 550): a frame drawn late lets the game catch up */
+bool plat_slow(void);
 const uint8_t *plat_load(const char *name, uint32_t *len);
 uint32_t plat_random(void);
 

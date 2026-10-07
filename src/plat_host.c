@@ -54,6 +54,7 @@ uint32_t plat_random(void) {
 void plat_seed(uint32_t s) { seed = s ? s : 1; }
 void plat_begin(void) {}
 int plat_end(void) { return 0; }
+bool plat_slow(void) { return false; }
 
 /* writes the screen as a PPM image */
 void host_shot(const char *path) {

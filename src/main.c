@@ -67,9 +67,15 @@ int main(void) {
 #endif
   ci_init();
   uint32_t next = plat_millis();
+  bool slow = plat_slow();
   while (game_running) {
     uint32_t t0 = plat_millis();
     game_tick();
+    /* (an N0110 or N0115, a frame behind: one more tick before drawing, so the game keeps its speed) */
+    if (slow && game_running && (int32_t)(t0 - next) > 1000 / FPS) {
+      game_tick();
+      next += 1000 / FPS + (game.ticks % 3 == 0 ? 1 : 0);
+    }
     if (!game_running) break;
     game_draw();
     perf_frames++;

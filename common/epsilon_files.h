@@ -88,6 +88,14 @@ static uint32_t ef_name_crc(const char *full) {
 static uint32_t *ef_cache(const ef_fs_t *fs, int end) {
   uint32_t *after = (uint32_t *)(void *)(fs->buf + fs->size + 4), *found = NULL;
   uint32_t base = (uint32_t)(uintptr_t)fs->buf;
+  if (epsilon_is_upsilon()) {
+    /* Upsilon's file system (Epsilon 15's) ends with the delegate, then the cache: (checksum,
+     * pointer), at fixed places. Clearing a cache is always safe; only check it is one. */
+    uint32_t delegate = after[0], ptr = after[2];
+    if (delegate && (delegate < 0x20000000u || delegate >= 0x20040000u)) return NULL;
+    if (ptr && (ptr < base || ptr >= base + (uint32_t)end)) return NULL;
+    return after; /* [1] and [2] are cleared, as below */
+  }
   for (int i = 1; i < 96; i++) {
     uint32_t *w = after + i;
     uint32_t accessible = w[0], crc = w[1], ptr = w[2];

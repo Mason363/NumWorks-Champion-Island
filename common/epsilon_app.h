@@ -15,6 +15,15 @@
  * firmware slot, 64 KiB later on models with an extra data sector. Only
  * addresses in external flash are probed, which exist on every model.
  *
+ * Upsilon. The custom software of the N0110 and N0115 runs .nwa apps too. Its
+ * header has the same first words but no device name (the footer comes two
+ * words sooner, then Omega's magic), and it has none of the system calls for
+ * Home (10, 13), checksums (15, 16) or flash: those are never made there.
+ *
+ * Models. The N0110 and N0115 (216 MHz) keep their userland right after the
+ * kernel and their RAM at 0x20000000; the N0120 (550 MHz) has an extra data
+ * sector before the userland and its RAM at 0x24000000.
+ *
  * Include it in one file per app. */
 #ifndef EPSILON_APP_H
 #define EPSILON_APP_H
@@ -28,25 +37,45 @@ typedef struct {
   uint32_t storage_ram, storage_size;
   uint32_t apps_flash_start, apps_flash_end;
   uint32_t apps_ram_start, apps_ram_end;
-  uint32_t name_flash_start, name_flash_end;
+  uint32_t name_flash_start, name_flash_end; /* (not on Upsilon: the footer, then Omega's magic) */
   uint32_t footer;
 } epsilon_userland_t;
 
 #if PLATFORM_DEVICE && !defined(HOST)
 
-/* The header of the software running this app, or NULL. */
-__attribute__((unused)) static const epsilon_userland_t *epsilon_userland(void) {
+/* The header of the software running this app, or NULL; *upsilon tells which. */
+__attribute__((unused)) static const epsilon_userland_t *epsilon_userland_of(bool *upsilon) {
   static const uint32_t where[] = {0x90010000u, 0x90020000u, 0x90410000u, 0x90420000u};
-  uint32_t self = (uint32_t)(uintptr_t)&epsilon_userland;
+  uint32_t self = (uint32_t)(uintptr_t)&epsilon_userland_of;
   const epsilon_userland_t *found = NULL;
+  bool ups = false;
   for (unsigned i = 0; i < sizeof where / sizeof where[0]; i++) {
     const volatile epsilon_userland_t *h = (const volatile epsilon_userland_t *)(uintptr_t)where[i];
-    if (h->magic != 0xDEC0EDFEu || h->footer != 0xDEC0EDFEu) continue;
+    const volatile uint32_t *w = (const volatile uint32_t *)(uintptr_t)where[i];
+    if (h->magic != 0xDEC0EDFEu) continue;
+    bool official = h->footer == 0xDEC0EDFEu, omega = w[9] == 0xDEC0EDFEu && w[10] == 0xEFBEADDEu;
+    if (!official && !omega) continue;
     if (self < h->apps_flash_start || self >= h->apps_flash_end) continue;
     if (found) return NULL; /* ambiguous: better not guess */
     found = (const epsilon_userland_t *)h;
+    ups = omega;
   }
+  if (upsilon) *upsilon = found && ups;
   return found;
+}
+__attribute__((unused)) static const epsilon_userland_t *epsilon_userland(void) { return epsilon_userland_of(NULL); }
+
+/* Upsilon (or Omega) runs this app: none of Epsilon's extra system calls. */
+__attribute__((unused)) static bool epsilon_is_upsilon(void) {
+  bool u = false;
+  epsilon_userland_of(&u);
+  return u;
+}
+
+/* An N0110 or N0115: 2.5 times slower than the N0120. */
+__attribute__((unused)) static bool epsilon_slow_model(void) {
+  const epsilon_userland_t *h = epsilon_userland();
+  return h ? h->storage_ram < 0x24000000u : false;
 }
 
 /* The record area of Epsilon's file system (after its magic word), or NULL. */
@@ -74,7 +103,8 @@ static bool epsilon_home_held;
 /* Epsilon's circuit breaker: while locked, Home cannot interrupt the app
  * (system calls 10 and 13, unchanged since 2021). */
 __attribute__((unused)) static void np_app_begin(void) {
-  if (numplay_launcher || !epsilon_userland()) return;
+  bool upsilon = false;
+  if (numplay_launcher || !epsilon_userland_of(&upsilon) || upsilon) return;
   __asm__ volatile("svc 10" ::: "r0", "r1", "r2", "r3", "r12", "memory");
   epsilon_home_held = true;
 }
@@ -95,6 +125,8 @@ __attribute__((unused)) static uint8_t *epsilon_storage(uint32_t *size) {
   (void)size;
   return NULL;
 }
+static inline bool epsilon_is_upsilon(void) { return false; }
+static inline bool epsilon_slow_model(void) { return false; }
 static inline void np_app_begin(void) {}
 static inline int np_app_end(void) { return 0; }
 #endif

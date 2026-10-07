@@ -45,3 +45,4 @@ void plat_seed(uint32_t s) { seed = s ? s : 1; }
 
 void plat_begin(void) { np_app_begin(); plat_seed((uint32_t)eadk_timing_millis() * 2654435761u); }
 int plat_end(void) { return np_app_end(); }
+bool plat_slow(void) { return epsilon_slow_model(); }
